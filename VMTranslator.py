@@ -9,6 +9,7 @@ Converts from virtual machine language to hax language
 
 """
 import sys
+import os
 
 class Parser:
     """Parses the infile which contains the VM code."""
@@ -22,7 +23,7 @@ class Parser:
         self.command = None
         
         # COMMENT STRIPPER
-        commands = ["pop","add","sub","push","neg","eq","gt","lt","and","or","not"]
+        commands = ["pop","add","sub","push","neg","eq","gt","lt","and","or","not","label","if-goto","goto","function","return","call"]
         for line in lines:
             line = line.split("//")
             line = line[0]
@@ -68,7 +69,13 @@ class Parser:
                 "lt" : "C_ARITHMETIC",
                 "and" : "C_ARITHMETIC",
                 "or" : "C_ARITHMETIC",
-                "not" : "C_ARITHMETIC"
+                "not" : "C_ARITHMETIC",
+                "label" : "C_LABEL",
+                "if-goto" : "C_IF",
+                "goto" : "C_GOTO",
+                "function" : "C_FUNCTION",
+                "return" : "C_RETURN",
+                "call" : "C_CALL"
                 }
         
         return commands.get(self.command[0],"Error")
@@ -89,6 +96,7 @@ class CodeWriter:
         """Initiates the code writer object."""
         self.outfile = open(filename,"w")
         self.jn = 0
+        self.labels = []
     
     def getJump(self):
         jumpname = "JUMP"+str(self.jn)
@@ -97,7 +105,6 @@ class CodeWriter:
     
     def writeArithmetic(self,command):
         """Writes arithmetic command."""
-
         if(command=="add"):
             self.outfile.write("@SP\n")
             self.outfile.write("AM=M-1\n")
@@ -200,7 +207,6 @@ class CodeWriter:
                     "that" : "@THAT\n"
                         }
             seg = segments.get(segment)
-            
             if(command=="C_PUSH"):
                 self.outfile.write(seg) 
                 self.outfile.write("D=M\n")
@@ -225,7 +231,7 @@ class CodeWriter:
         elif(segment=="constant"):
             self.outfile.write("@"+str(index)+"\nD=A\n")
             self.outfile.write("@SP\nM=M+1\nA=M-1\nM=D\n")
-            return
+            return None
         
         # PUSH/POP POINTER
         elif(segment=="pointer"):
@@ -244,7 +250,7 @@ class CodeWriter:
                 # SP++
                 self.outfile.write("@SP\n")
                 self.outfile.write("M=M+1\n")
-                return
+                return None
             elif(command=="C_POP"):
                 # SP--
                 self.outfile.write("@SP\n")
@@ -254,16 +260,12 @@ class CodeWriter:
                 self.outfile.write("D=M\n") # D = *SP
                 self.outfile.write("@R"+str(m)+"\n")# @R3/R4
                 self.outfile.write("M=D\n") # THIS/THAT = D
-                return
+                return None
                 
         # PUSH/POP TEMP
-        elif(segment=="temp" or segment=="static"):
-            if(segment=="temp"):
-                os = 5
-            elif(segment=="static"):
-                os = 16    
+        elif(segment=="temp"):
             if(command=="C_PUSH"):
-                 self.outfile.write("@"+str(os+int(index))+"\n")
+                 self.outfile.write("@"+str(5+int(index))+"\n")
                  self.outfile.write("D=M\n")
                  self.outfile.write("@SP\n")
                  self.outfile.write("M=M+1\n")
@@ -273,52 +275,277 @@ class CodeWriter:
                  self.outfile.write("@SP\n")
                  self.outfile.write("AM=M-1\n")
                  self.outfile.write("D=M\n")
-                 self.outfile.write("@"+str(os+int(index))+"\n")
+                 self.outfile.write("@"+str(5+int(index))+"\n")
                  self.outfile.write("M=D\n")
         
+        # PUSH/POP STATIC         
+        elif(segment=="static"):   
+            if(command=="C_PUSH"):
+                 self.outfile.write("@"+self.fileName+str(index)+"\n")
+                 self.outfile.write("D=M\n")
+                 self.outfile.write("@SP\n")
+                 self.outfile.write("M=M+1\n")
+                 self.outfile.write("A=M-1\n")
+                 self.outfile.write("M=D\n")
+            elif(command=="C_POP"):
+                 self.outfile.write("@SP\n")
+                 self.outfile.write("AM=M-1\n")
+                 self.outfile.write("D=M\n")
+                 self.outfile.write("@"+self.fileName+str(index)+"\n")
+                 self.outfile.write("M=D\n")
+        return None
+    
+    def setFileName(self,fileName):
+        self.fileName = fileName
+        return None
+    
+    def writeInit(self):
+        '''Writes assembly instructions that effect the bootstrap code. Must be placed at beginning of *.asm'''
+#        self.outfile.write("@Sys.init\n")
+#        self.outfile.write("0;JMP\n")
+        self.outfile.write("@256\n")
+        self.outfile.write("D=A\n")
+        self.outfile.write("@SP\n")
+        self.outfile.write("M=D\n")
+        self.writeCall("Sys.init",0)
+        return None
+    
+    def writeLabel(self,label):
+        '''effects the label command'''
+        if label not in self.labels:
+            self.labels.append(label)
+        self.outfile.write("("+label+")\n")
+        return None
+    
+    def writeGoto(self,label):
+        '''effects the goto command'''
+        self.outfile.write("@"+label+"\n")
+        self.outfile.write("0;JMP\n")
+        return None
+    
+    def writeIf(self,label):
+        '''effects the if-goto command'''
+        self.outfile.write("@SP\n")
+        self.outfile.write("AM=M-1\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@"+label+"\n")
+        self.outfile.write("D;JNE\n")
+        return None
+    
+    def writeCall(self,functionName,numArgs):
+        '''Writes assembly code that effects the call command'''
+        # PUSH ALL NEEDED ARGS
+        #for i in range(0,int(numArgs)):
+        #    self.writePushPop("C_PUSH","argument",i)
         
+        # SAVE THE FRAME OF THE CALLER
+        cJump = self.getJump()
+        self.outfile.write("@"+cJump+"\n")
+        self.outfile.write("D=A\n")
+        # PUSH D TO THE STACK
+        self.outfile.write("@SP\n")
+        self.outfile.write("AM=M+1\n")
+        self.outfile.write("A=A-1\n")
+        self.outfile.write("M=D\n")
+        
+        # POINTER PUSHES
+        self.writePointerPush("LCL")
+        self.writePointerPush("ARG")
+        self.writePointerPush("THIS")
+        self.writePointerPush("THAT")
+        
+        # SET ARG ADDRESS
+        self.writePointerPush("SP")
+        self.writePushPop("C_PUSH","constant",numArgs)
+        self.writeArithmetic("sub")
+        self.writePushPop("C_PUSH","constant",5)
+        self.writeArithmetic("sub")
+        self.writePointerPop("ARG")
+        
+        # WRITE THE FUNCTION?
+        self.outfile.write("@"+functionName+"\n")
+        self.outfile.write("0;JMP\n")
+        
+        # RETURN ADDRESS
+        self.outfile.write("("+cJump+")\n")
+        return None
+    
+    def writeFunction(self,functionName,numVars):
+        '''Writes assembly code that effects the function command'''
+        # JUMP ADDRESS
+        self.outfile.write("("+functionName+")\n")
+        
+        # SET LCL TO SP
+        self.writePointerPush("SP")
+        self.writePointerPop("LCL")
+        
+        # INITIALIZE LOCAL VARIABLES TO 0
+        for i in range(0,int(numVars)):
+            self.writePushPop("C_PUSH","constant",0)
+        return None    
+    
+    def writePointerPop(self,pointer):
+        '''Pushes stack to pointer'''
+        self.outfile.write("@SP\n")
+        self.outfile.write("AM=M-1\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@"+str(pointer)+"\n")
+        self.outfile.write("M=D\n")
+        return None
+    
+    def writePointerPush(self,pointer):
+        '''Push pointer address to the stack'''
+        self.outfile.write("@"+str(pointer)+"\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@SP\n")
+        self.outfile.write("M=M+1\n")
+        self.outfile.write("A=M-1\n")
+        self.outfile.write("M=D\n")
+        return None
+        
+    def writeReturn(self):
+        '''writes assembly code that effects the return command'''
+        # SAVE THE RETURN VALUE IN R13
+        self.outfile.write("@SP\n")
+        self.outfile.write("A=M-1\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@R13\n")
+        self.outfile.write("M=D\n")
+        
+        # SAVE THE RETURN VALUE LOCATION IN R14
+        self.outfile.write("@ARG\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@R14\n")
+        self.outfile.write("M=D\n")
+        
+        # POSITION THE POINTER AT THE END OF THE SAVED FRAME
+        self.outfile.write("@LCL\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@SP\n")
+        self.outfile.write("M=D\n")
+        
+        # RESTORE POINTERS
+        self.writePointerPop("THAT")
+        self.writePointerPop("THIS")
+        self.writePointerPop("ARG")
+        self.writePointerPop("LCL")
+        
+        # SAVE THE RETURN ADDRESS IN R15
+        self.outfile.write("@SP\n")
+        self.outfile.write("A=M-1\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@R15\n")
+        self.outfile.write("M=D\n")
+        
+        # PLACE RETURN VALUE
+        self.outfile.write("@R13\n")
+        self.outfile.write("D=M\n")
+        self.outfile.write("@R14\n")
+        self.outfile.write("A=M\n")
+        self.outfile.write("M=D\n")
+        
+        # POSITION THE POINTER
+        self.outfile.write("D=A+1\n")
+        self.outfile.write("@SP\n")
+        self.outfile.write("M=D\n")
+    
+        # GO TO RETURN ADDRESS
+        self.outfile.write("@R15\n")
+        self.outfile.write("A=M\n")
+        self.outfile.write("0;JMP\n")
+        return None
+    
     def close(self):
         """Closes the outfile."""
         self.outfile.close()
+        return None
 
+def getFiles(filename):
+    if(".vm" in filename):
+        print("EASY CASE")
+    else:
+        print("HARD CASE")
 
-def main():  
-    filename = sys.argv[1]
-    #filename = "StackArithmetic\\SimpleAdd\\SimpleAdd.vm"
-    #filename = "StackArithmetic\\StackTest\\StackTest.vm"
-    #filename = "MemoryAccess\\BasicTest\\BasicTest.vm"
-    #filename = "MemoryAccess\\PointerTest\\PointerTest.vm"
-    #filename = "MemoryAccess\\StaticTest\\StaticTest.vm"    
-    file = Parser(filename) # create object
+def main():
+    d = "/"
+    # FILE OR DIRECTORY NAME
+    programinput = sys.argv[1]
+    #programinput = "07\\MemoryAccess\\StaticTest\\StaticTest.vm"
+    #filename = "08\\ProgramFlow\\BasicLoop\\BasicLoop.vm"
+    #filename = "08\\ProgramFlow\\FibonacciSeries\\FibonacciSeries.vm"
+    #filename = "08\\FunctionCalls\\SimpleFunction\\SimpleFunction.vm"
+    #programinput = "08\\FunctionCalls\\NestedCall"
+    #programinput = "08\\FunctionCalls\\FibonacciElement"
+    #programinput = "08/FunctionCalls/StaticsTest"
     
-    outfilename = filename.replace('.vm','.asm')
-    print("Out File: "+outfilename)
+    # GENERATE FILENAMES AND OUTFILENAME
+    if(".vm" in programinput):
+        filenames = [programinput]
+        outfilename = programinput.replace('.vm','.asm')
+        initneeded = False
+    else:
+        programdir = os.listdir(programinput)
+        filenames = [programinput+d+f for f in programdir if '.vm' in f]
+        outfilename = programinput+d+programinput.split(d)[-1]+".asm"
+        initneeded = True
     outfile = CodeWriter(outfilename)
+
     
     
-    while(file.hasMoreCommands()):
-        file.advance()
+    # VERIFICATION
+    print("In File(s): ", end = "")
+    print(filenames)
+    print("Out File: "+outfilename)
+    
+    # DOES THE PROGRAM NEED TO BE INITATIED
+    if(initneeded):
+        outfile.writeInit()
         
-        # TEST SCRIPT
-        print("commandType(): "+file.commandType(), end = " ")
-        if file.commandType() != "C_RETURN":
-            print("arg1(): "+file.arg1(), end = " ")
-        tsts = ["C_PUSH","C_POP","C_FUNCTION","C_CALL"]
-        p = any(tst in file.commandType() for tst in tsts)
-        if p:
-            print("arg2(): "+file.arg2(), end = " ")
-        print(file.command)
+    # GO THROUGH ALL NEEDED FILES
+    for filename in filenames:
         
-        if("C_ARITHMETIC"==file.commandType()):
-            outfile.writeArithmetic(file.arg1())
-        if("C_PUSH"==file.commandType() or "C_POP"==file.commandType()):
-            outfile.writePushPop(file.commandType(), file.arg1(), file.arg2())
-       
+        # CREATE FILE OBJECT
+        file = Parser(filename)
+        
+        outfile.setFileName(filename.split(d)[-1].strip(".vm"))
+        
+        while(file.hasMoreCommands()):
+            file.advance()
+            
+            # TEST SCRIPT
+            print("commandType(): "+file.commandType(), end = " ")
+            if file.commandType() != "C_RETURN":
+                print("arg1(): "+file.arg1(), end = " ")
+            tsts = ["C_PUSH","C_POP","C_FUNCTION","C_CALL"]
+            p = any(tst in file.commandType() for tst in tsts)
+            if p:
+                print("arg2(): "+file.arg2(), end = " ")
+            print(file.command)
+            
+            # MAIN PROGRAM
+            if("C_ARITHMETIC"==file.commandType()):
+                outfile.writeArithmetic(file.arg1())
+            if("C_PUSH"==file.commandType() or "C_POP"==file.commandType()):
+                outfile.writePushPop(file.commandType(), file.arg1(), file.arg2())
+            if("C_LABEL"==file.commandType()):
+                outfile.writeLabel(file.arg1())
+            if("C_IF"==file.commandType()):
+                outfile.writeIf(file.arg1())
+            if("C_GOTO"==file.commandType()):
+                outfile.writeGoto(file.arg1())
+            if("C_FUNCTION"==file.commandType()):
+                outfile.writeFunction(file.arg1(),file.arg2())
+            if("C_RETURN"==file.commandType()):
+                outfile.writeReturn()
+            if("C_CALL"==file.commandType()):
+                outfile.writeCall(file.arg1(),file.arg2())
     outfile.close()
     
-    # TEST SCRIPT
-    test_outfile = open(outfilename)
-    print(test_outfile.read())
+    # PRINT THE FILE JUST CREATED
+    #test_outfile = open(outfilename)
+    #print(test_outfile.read())
+    
+    return None
 
 if __name__=="__main__":
     main()
